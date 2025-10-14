@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, DebertaV2ForSequenceClassification, DebertaV2TokenizerFast
+from transformers.modeling_outputs import SequenceClassifierOutput
 from peft import PeftModel
 from pydantic import BaseModel, HttpUrl
 import httpx
@@ -7,11 +9,28 @@ import gc
 import torch
 from uuid import UUID, uuid4
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Global queue and processing flag
 request_queue: dict[UUID, "DetectionRequest"] = {}
 processing_lock = asyncio.Lock()
 is_processing = False
+
+# Config from environment variables
+tokenizer_name = os.getenv("TOKENIZER_NAME", "srikanthgali/paradetect-deberta-v3-lora")
+base_model_name = os.getenv("BASE_MODEL_NAME", "microsoft/deberta-v3-large")
+model_name = os.getenv("MODEL_NAME", "srikanthgali/paradetect-deberta-v3-lora")
+callback_timeout = int(os.getenv("CALLBACK_TIMEOUT", "30"))
+queue_check_interval = int(os.getenv("QUEUE_CHECK_INTERVAL", "5"))
+truncation = os.getenv("TRUNCATION", "True").lower() in ("true", "1", "yes", "on")
+padding = os.getenv("PADDING", "True").lower() in ("true", "1", "yes", "on")
+max_length = int(os.getenv("MAX_LENGTH", "512"))
+host = os.getenv("HOST", "0.0.0.0")
+port = int(os.getenv("PORT", "8000"))
 
 class DetectionRequest(BaseModel):
     id: str
@@ -28,6 +47,10 @@ class CallbackPayload(BaseModel):
     human_prob: float
     ai_prob: float
 
+class QueueStatus(BaseModel):
+    is_processing: bool
+    queued_ids: list[str]
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Start background processor
@@ -38,41 +61,39 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-def load_model():
+def load_model() -> tuple[DebertaV2TokenizerFast, DebertaV2ForSequenceClassification, PeftModel]:
     """Load model on-demand"""
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    from peft import PeftModel
-    
-    tokenizer = AutoTokenizer.from_pretrained("srikanthgali/paradetect-deberta-v3-lora")
-    base_model = AutoModelForSequenceClassification.from_pretrained(
-        "microsoft/deberta-v3-large",
-        num_labels=2
-    )
-    model = PeftModel.from_pretrained(base_model, "srikanthgali/paradetect-deberta-v3-lora")
+    tokenizer: DebertaV2TokenizerFast = AutoTokenizer.from_pretrained(tokenizer_name)
+    base_model: DebertaV2ForSequenceClassification = AutoModelForSequenceClassification.from_pretrained(base_model_name, num_labels=2)
+    model = PeftModel.from_pretrained(base_model, model_name)
     model.eval()
     
-    return tokenizer, model
+    return tokenizer, base_model, model
 
-def unload_model(tokenizer, model):
+def unload_model(tokenizer: DebertaV2TokenizerFast, base_model: DebertaV2ForSequenceClassification, model: PeftModel):
     """Unload model to free memory"""
     del tokenizer
+    del base_model
     del model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-def predict_text_origin(text: str, tokenizer, model: PeftModel, uuid: UUID) -> CallbackPayload:
+def predict_text_origin(text: str, tokenizer: DebertaV2TokenizerFast, model: PeftModel, uuid: UUID) -> CallbackPayload:
     """Run prediction on text"""
     inputs = tokenizer(
         text,
         return_tensors="pt",
         truncation=True,
-        max_length=512,
-        padding=True
+        padding=True,
+        max_length=max_length
     )
     
     with torch.no_grad():
-        outputs = model(**inputs)
+        outputs: SequenceClassifierOutput = model(**inputs)
+        if outputs.logits is None:
+            raise ValueError("Model output logits are None")
+
         probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
         prediction = torch.argmax(probabilities, dim=-1)
         
@@ -92,7 +113,7 @@ async def process_queue():
     global is_processing
     
     while True:
-        await asyncio.sleep(1)  # Check queue every second
+        await asyncio.sleep(queue_check_interval)
         
         if not request_queue:
             continue
@@ -109,7 +130,7 @@ async def process_queue():
             
             try:
                 # Load model once for batch
-                tokenizer, model = load_model()
+                tokenizer, base_model, model = load_model()
                 
                 # Process each request
                 for req_uuid, req in items:
@@ -118,7 +139,7 @@ async def process_queue():
                         result = predict_text_origin(req.content, tokenizer, model, req_uuid)
                         
                         # Send callback
-                        async with httpx.AsyncClient(timeout=30.0) as client:
+                        async with httpx.AsyncClient(timeout=callback_timeout) as client:
                             await client.post(
                                 str(req.callback_url),
                                 json=result.model_dump(mode='json')
@@ -127,7 +148,7 @@ async def process_queue():
                         print(f"Error processing request {req_uuid}: {e}")
                 
                 # Unload model to free memory
-                unload_model(tokenizer, model)
+                unload_model(tokenizer, base_model, model)
                 
             except Exception as e:
                 print(f"Error in queue processing: {e}")
@@ -158,14 +179,13 @@ async def enqueue_request(request: DetectionRequest):
     return EnqueueResponse(uuid=req_uuid)
 
 @app.get("/queue")
-async def queue_status():
+async def queue_status() -> QueueStatus:
     """Get queue status"""
-    return {
-        "queue_size": len(request_queue),
-        "is_processing": is_processing,
-        "queued_ids": [req.id for req in request_queue.values()]
-    }
+    return QueueStatus(
+        is_processing=is_processing,
+        queued_ids=[req.id for req in request_queue.values()]
+    )
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=host, port=port)

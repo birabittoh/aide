@@ -16,7 +16,7 @@ import os
 load_dotenv()
 
 # Global queue and processing flag
-request_queue: dict[UUID, "DetectionRequest"] = {}
+request_queue: dict[UUID, "EnqueueRequest"] = {}
 processing_lock = asyncio.Lock()
 is_processing = False
 
@@ -32,7 +32,7 @@ max_length = int(os.getenv("MAX_LENGTH", "512"))
 host = os.getenv("HOST", "0.0.0.0")
 port = int(os.getenv("PORT", "8000"))
 
-class DetectionRequest(BaseModel):
+class EnqueueRequest(BaseModel):
     id: str
     content: str
     callback_url: HttpUrl
@@ -162,7 +162,7 @@ async def debug_endpoint(request: CallbackPayload):
     return {"status": "ok"}
 
 @app.post("/enqueue", response_model=EnqueueResponse)
-async def enqueue_request(request: DetectionRequest):
+async def enqueue_request(request: EnqueueRequest):
     """Enqueue a detection request"""
     # Check if request with same id already exists
     existing_uuid = None

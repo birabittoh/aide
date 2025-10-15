@@ -1,6 +1,7 @@
 services:
   aide:
     build: .
+    image: ghcr.io/birabittoh/aide:main
     container_name: aide
     ports:
       - "8000:8000"
@@ -9,7 +10,7 @@ services:
       - HF_HOME=/app/models
     volumes:
       # Persist model cache across container restarts
-      - model_cache:/app/models
+      - ./models:/app/models
     restart: unless-stopped
     # Memory limits for low-memory environment
     deploy:

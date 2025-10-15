@@ -3,7 +3,7 @@ name = "aide"
 version = "0.1.0"
 description = "AI detection service"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10,<3.12"
 dependencies = [
     "fastapi>=0.119.0",
     "httpx>=0.28.1",

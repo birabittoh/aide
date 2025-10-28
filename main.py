@@ -1,16 +1,18 @@
+from typing import Optional
 from fastapi import FastAPI
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, DebertaV2ForSequenceClassification, DebertaV2TokenizerFast
-from transformers.modeling_outputs import SequenceClassifierOutput
-from peft import PeftModel
 from pydantic import BaseModel, HttpUrl
 import httpx
 import asyncio
 import gc
-import torch
+import pickle
+from scipy.sparse import hstack
+from transformers import PreTrainedTokenizerFast
 from uuid import UUID, uuid4
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import os
+
+from common import extract_additional_features, dummy # dummy is used by pickle.load
 
 # Load environment variables from .env file
 load_dotenv()
@@ -21,21 +23,16 @@ processing_lock = asyncio.Lock()
 is_processing = False
 
 # Config from environment variables
-tokenizer_name = os.getenv("TOKENIZER_NAME", "srikanthgali/paradetect-deberta-v3-lora")
-base_model_name = os.getenv("BASE_MODEL_NAME", "microsoft/deberta-v3-large")
-model_name = os.getenv("MODEL_NAME", "srikanthgali/paradetect-deberta-v3-lora")
+model_path = os.getenv("MODEL_PATH", "./models/8 - lightest/")
 callback_timeout = int(os.getenv("CALLBACK_TIMEOUT", "30"))
 queue_check_interval = int(os.getenv("QUEUE_CHECK_INTERVAL", "5"))
-truncation = os.getenv("TRUNCATION", "True").lower() in ("true", "1", "yes", "on")
-padding = os.getenv("PADDING", "True").lower() in ("true", "1", "yes", "on")
-max_length = int(os.getenv("MAX_LENGTH", "512"))
 host = os.getenv("HOST", "0.0.0.0")
 port = int(os.getenv("PORT", "8000"))
 
 class EnqueueRequest(BaseModel):
     id: str
     content: str
-    callback_url: HttpUrl
+    callback_url: Optional[HttpUrl]
 
 class EnqueueResponse(BaseModel):
     uuid: UUID
@@ -61,52 +58,56 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-def load_model() -> tuple[DebertaV2TokenizerFast, DebertaV2ForSequenceClassification, PeftModel]:
-    """Load model on-demand"""
-    tokenizer: DebertaV2TokenizerFast = AutoTokenizer.from_pretrained(tokenizer_name)
-    base_model: DebertaV2ForSequenceClassification = AutoModelForSequenceClassification.from_pretrained(base_model_name, num_labels=2)
-    model = PeftModel.from_pretrained(base_model, model_name)
-    model.eval()
+def load_model():
+    """Load ensemble model, vectorizer, and tokenizer on-demand"""
+    # Load ensemble model
+    with open(model_path + 'ensemble_model.pkl', 'rb') as f:
+        ensemble = pickle.load(f)
     
-    return tokenizer, base_model, model
+    # Load vectorizer
+    with open(model_path + 'tfidf_vectorizer.pkl', 'rb') as f:
+        vectorizer = pickle.load(f)
+    
+    # Load tokenizer
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(model_path + 'bpe_tokenizer')
+    
+    return ensemble, vectorizer, tokenizer
 
-def unload_model(tokenizer: DebertaV2TokenizerFast, base_model: DebertaV2ForSequenceClassification, model: PeftModel):
+def unload_model(ensemble, vectorizer, tokenizer):
     """Unload model to free memory"""
+    del ensemble
+    del vectorizer
     del tokenizer
-    del base_model
-    del model
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
-def predict_text_origin(text: str, tokenizer: DebertaV2TokenizerFast, model: PeftModel, uuid: UUID) -> CallbackPayload:
-    """Run prediction on text"""
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=max_length
-    )
+def predict_text_origin(text: str, ensemble, vectorizer, tokenizer, uuid: UUID) -> CallbackPayload:
+    """Run prediction on text using ensemble model"""
+    # Tokenize
+    tokenized = tokenizer.tokenize(text)
     
-    with torch.no_grad():
-        outputs: SequenceClassifierOutput = model(**inputs)
-        if outputs.logits is None:
-            raise ValueError("Model output logits are None")
-
-        probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
-        prediction = torch.argmax(probabilities, dim=-1)
-        
-        human_prob = probabilities[0][0].item()
-        ai_prob = probabilities[0][1].item()
-
-        return CallbackPayload(
-            uuid=uuid,
-            prediction="AI" if prediction.item() == 1 else "Human",
-            confidence=max(human_prob, ai_prob),
-            human_prob=human_prob,
-            ai_prob=ai_prob
-        )
+    # Vectorize
+    vectorized = vectorizer.transform([tokenized])
+    
+    # Extract additional features
+    extra_features = extract_additional_features([text])
+    
+    # Concatenate sparse + dense features
+    full_features = hstack([vectorized, extra_features])
+    
+    # Predict
+    probabilities = ensemble.predict_proba(full_features)[0]
+    prediction = ensemble.predict(full_features)[0]
+    
+    human_prob = probabilities[0]
+    ai_prob = probabilities[1]
+    
+    return CallbackPayload(
+        uuid=uuid,
+        prediction="AI" if prediction == 1 else "Human",
+        confidence=max(human_prob, ai_prob),
+        human_prob=human_prob,
+        ai_prob=ai_prob
+    )
 
 async def process_queue():
     """Background task to process queued requests"""
@@ -130,25 +131,27 @@ async def process_queue():
             
             try:
                 # Load model once for batch
-                tokenizer, base_model, model = load_model()
+                ensemble, vectorizer, tokenizer = load_model()
                 
                 # Process each request
                 for req_uuid, req in items:
                     try:
                         # Run prediction
-                        result = predict_text_origin(req.content, tokenizer, model, req_uuid)
+                        result = predict_text_origin(req.content, ensemble, vectorizer, tokenizer, req_uuid)
+
+                        callback_url = str(req.callback_url) if req.callback_url else f"http://localhost:{port}/debug"
                         
                         # Send callback
                         async with httpx.AsyncClient(timeout=callback_timeout) as client:
                             await client.post(
-                                str(req.callback_url),
+                                callback_url,
                                 json=result.model_dump(mode='json')
                             )
                     except Exception as e:
                         print(f"Error processing request {req_uuid}: {e}")
                 
                 # Unload model to free memory
-                unload_model(tokenizer, base_model, model)
+                unload_model(ensemble, vectorizer, tokenizer)
                 
             except Exception as e:
                 print(f"Error in queue processing: {e}")

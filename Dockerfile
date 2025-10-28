@@ -15,13 +15,10 @@ COPY .python-version .
 RUN uv sync
 
 # Copy application code
-COPY main.py .
+COPY *.py .
 
 # Create directory for model cache
 RUN mkdir -p /app/models
-
-# Set environment variable for model cache
-ENV HF_HOME=/app/models
 
 # Expose port
 EXPOSE 8000

@@ -4,39 +4,35 @@ import pandas as pd
 from scipy.sparse import hstack
 from transformers import PreTrainedTokenizerFast
 from tqdm.auto import tqdm
+import os
+import sys
+import json
+from dotenv import load_dotenv
 
 from common import PATH_PREFIX, extract_additional_features, dummy # dummy is used by pickle.load
 
 # ==================== Load Model and Preprocessing ====================
-print("Loading model and preprocessing artifacts...")
+def load_models(prefix: str = PATH_PREFIX):
+    print("Loading model and preprocessing artifacts...")
 
-# Load ensemble model
-with open(PATH_PREFIX + 'ensemble_model.pkl', 'rb') as f:
-    ensemble = pickle.load(f)
-print("✓ Ensemble model loaded")
+    # Load ensemble model
+    with open(prefix + 'ensemble_model.pkl', 'rb') as f:
+        ensemble = pickle.load(f)
+    print("[OK] Ensemble model loaded")
 
-# Load vectorizer
-with open(PATH_PREFIX + 'tfidf_vectorizer.pkl', 'rb') as f:
-    vectorizer = pickle.load(f)
-print("✓ TF-IDF vectorizer loaded")
+    # Load vectorizer
+    with open(prefix + 'tfidf_vectorizer.pkl', 'rb') as f:
+        vectorizer = pickle.load(f)
+    print("[OK] TF-IDF vectorizer loaded")
 
-# Load tokenizer
-tokenizer = PreTrainedTokenizerFast.from_pretrained(PATH_PREFIX + 'bpe_tokenizer')
-print("✓ BPE tokenizer loaded")
+    # Load tokenizer
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(prefix + 'bpe_tokenizer')
+    print("[OK] BPE tokenizer loaded")
 
-# Load model info (optional)
-try:
-    with open('model_info.pkl', 'rb') as f:
-        model_info = pickle.load(f)
-    print(f"✓ Model info loaded")
-    print(f"  Models: {model_info['models']}")
-except:
-    print("⚠ Model info not found (optional)")
-
-print("\n" + "="*60)
+    return ensemble, vectorizer, tokenizer
 
 # ==================== Prediction Functions ====================
-def predict_text(text: str, return_proba=True):
+def predict_text(text: str, ensemble, vectorizer, tokenizer, return_proba=True):
     """
     Predict if a text is AI-generated or human-written
     
@@ -67,7 +63,7 @@ def predict_text(text: str, return_proba=True):
         pred = ensemble.predict(full_features)[0]
         return pred
 
-def predict_batch(texts, show_progress=True):
+def predict_batch(texts, ensemble, vectorizer, tokenizer, show_progress=True):
     """
     Predict multiple texts at once
     
@@ -111,7 +107,7 @@ def predict_batch(texts, show_progress=True):
 
     return results
 
-def get_model_info():
+def get_model_info(ensemble):
     """
     Display information about the loaded ensemble model
     """
@@ -121,33 +117,96 @@ def get_model_info():
     print(f"Ensemble type: {type(ensemble).__name__}")
     print(f"Number of estimators: {len(ensemble.estimators_)}")
     print("\nBase models:")
-    #for i, (name, model) in enumerate(ensemble.estimators):
-    #    weight = ensemble.weights[i] if ensemble.weights is not None else 1.0/len(ensemble.estimators_)
-    #    print(f"  {i+1}. {name}: {type(model).__name__} (weight: {weight:.2f})")
-    #print(f"\nVoting method: {ensemble.voting}")
     print("="*60)
+
+# ==================== Subprocess Mode ====================
+def run_batch_prediction(input_path: str, output_path: str):
+    """
+    Run batch prediction from JSON input file and save to JSON output file.
+    Called when script is run as subprocess.
+    """
+    # Load models
+    ensemble, vectorizer, tokenizer = load_models()
+    
+    # Read input
+    with open(input_path, 'r') as f:
+        requests = json.load(f)
+    
+    results = []
+    
+    # Process each request
+    for req in requests:
+        uuid = req['uuid']
+        text = req['text']
+        
+        # Tokenize
+        tokenized = tokenizer.tokenize(text)
+        
+        # Vectorize
+        vectorized = vectorizer.transform([tokenized])
+        
+        # Extract additional features
+        extra_features = extract_additional_features([text])
+        
+        # Concatenate sparse + dense features
+        full_features = hstack([vectorized, extra_features])
+        
+        # Predict
+        probabilities = ensemble.predict_proba(full_features)[0]
+        prediction = ensemble.predict(full_features)[0]
+        
+        human_prob = float(probabilities[0])
+        ai_prob = float(probabilities[1])
+        
+        results.append({
+            'uuid': uuid,
+            'prediction': 'AI' if prediction == 1 else 'Human',
+            'confidence': max(human_prob, ai_prob),
+            'human_prob': human_prob,
+            'ai_prob': ai_prob
+        })
+    
+    # Write output
+    with open(output_path, 'w') as f:
+        json.dump(results, f)
+    
+    print(f"[OK] Processed {len(results)} requests")
 
 # ==================== Example Usage ====================
 if __name__ == "__main__":
+    load_dotenv()
+
+    prefix = os.getenv('MODEL_PATH_PREFIX', PATH_PREFIX)
+    
+    # Check if running in subprocess mode
+    if len(sys.argv) == 3:
+        input_path = sys.argv[1]
+        output_path = sys.argv[2]
+        run_batch_prediction(input_path, output_path)
+        sys.exit(0)
+    
+    # Otherwise run interactive examples
+    ensemble, vectorizer, tokenizer = load_models(prefix)
+    
     print("\n" + "="*60)
     print("AI CONTENT DETECTION - INFERENCE")
     print("="*60)
     
     # Display model info
-    get_model_info()
+    get_model_info(ensemble)
     
     # Example 1: Single text prediction
-    print("\n📝 Example 1: Single Text Prediction")
+    print("\nExample 1: Single Text Prediction")
     print("-" * 60)
     
     sample_text = """
-    Artificial intelligence — it has revolutionized the way we interact with technology.
+    Artificial intelligence – it has revolutionized the way we interact with technology.
     Machine learning algorithms can now process vast amounts of data and identify
     patterns that would be impossible for humans to detect manually.
     """
     
-    probability = predict_text(sample_text, return_proba=True)
-    prediction = predict_text(sample_text, return_proba=False)
+    probability = predict_text(sample_text, ensemble, vectorizer, tokenizer, return_proba=True)
+    prediction = predict_text(sample_text, ensemble, vectorizer, tokenizer, return_proba=False)
     
     print(f"Text: {sample_text.strip()[:100]}...")
     print(f"\nPrediction: {'AI-generated' if prediction == 1 else 'Human-written'}")
@@ -155,7 +214,7 @@ if __name__ == "__main__":
     print(f"Confidence: {abs(probability - 0.5) * 2:.4f}")
     
     # Example 2: Batch prediction
-    print("\n\n📚 Example 2: Batch Prediction")
+    print("\n\nExample 2: Batch Prediction")
     print("-" * 60)
     
     sample_texts = [
@@ -175,7 +234,7 @@ Hmm...no, the Kimotoma Ruins are pretty much the only thing that needs that Lice
         "Hey! How's it going? I'm just chilling at home watching some Netflix."
     ]
     
-    results = predict_batch(sample_texts, show_progress=True)
+    results = predict_batch(sample_texts, ensemble, vectorizer, tokenizer, show_progress=True)
     
     print("\nResults:")
     pd.set_option('display.max_colwidth', 50)
@@ -183,31 +242,31 @@ Hmm...no, the Kimotoma Ruins are pretty much the only thing that needs that Lice
     pd.reset_option('display.max_colwidth')
     
     # Example 3: Load and predict from CSV
-    print("\n\n📄 Example 3: Predict from CSV (if available)")
+    print("\n\nExample 3: Predict from CSV (if available)")
     print("-" * 60)
     
     try:
         # Try to load a CSV file
         df = pd.read_csv('test_essays.csv')
-        print(f"✓ Found test file with {len(df)} rows")
+        print(f"[OK] Found test file with {len(df)} rows")
         
         # Predict on a subset
         sample_size = min(10, len(df))
         sample_df = df.head(sample_size)
         
         print(f"\nProcessing first {sample_size} rows...")
-        results = predict_batch(sample_df['text'].tolist(), show_progress=True)
+        results = predict_batch(sample_df['text'].tolist(), ensemble, vectorizer, tokenizer, show_progress=True)
         
         print(f"\nPredictions for first {sample_size} rows:")
         print(results[['prediction', 'ai_probability', 'confidence']].to_string())
         
         # Save results
         results.to_csv('predictions.csv', index=False)
-        print(f"\n✓ Full predictions saved to: predictions.csv")
+        print(f"\n[OK] Full predictions saved to: predictions.csv")
         
     except FileNotFoundError:
-        print("⚠ No test_essays.csv found. Skipping this example.")
+        print("[WARN] No test_essays.csv found. Skipping this example.")
     except Exception as e:
-        print(f"⚠ Error processing CSV: {e}")
+        print(f"[WARN] Error processing CSV: {e}")
     
     print("\n" + "="*60)

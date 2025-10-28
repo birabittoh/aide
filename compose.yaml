@@ -5,11 +5,7 @@ services:
     container_name: aide
     ports:
       - "8000:8000"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - HF_HOME=/app/models
     volumes:
-      # Persist model cache across container restarts
       - ./models:/app/models
     restart: unless-stopped
     # Memory limits for low-memory environment
@@ -19,6 +15,3 @@ services:
           memory: 4G
         reservations:
           memory: 2G
-
-volumes:
-  model_cache:

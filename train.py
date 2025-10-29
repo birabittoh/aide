@@ -1,8 +1,7 @@
 import gc
 import os
 import pickle
-
-# Optuna for hyperparameter optimization
+import random
 import optuna
 
 import pandas as pd
@@ -34,6 +33,7 @@ from sklearn.naive_bayes import MultinomialNB
 
 # Set random state
 RANDOM_STATE = 42
+random.seed(RANDOM_STATE)
 np.random.seed(RANDOM_STATE)
 
 # ==================== Loading Data ====================
@@ -136,6 +136,7 @@ print(f"Train labels: {len(y_train)}, Test labels: {len(y_test)}")
 # ==================== Configuration Parameters ====================
 LOWERCASE = False
 VOCAB_SIZE = 30522
+OPTUNA_TRIALS = 150
 
 # ==================== Byte-Pair Encoding Tokenizer Training ====================
 print("Training BPE tokenizer...")
@@ -246,8 +247,9 @@ def objective(trial):
     return roc_auc_score(y_test, y_pred_proba)
 
 print("\nRunning Optuna study for SGDClassifier hyperparameters...")
-study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=100)
+sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)
+study = optuna.create_study(direction='maximize', sampler=sampler)
+study.optimize(objective, n_trials=OPTUNA_TRIALS)
 
 print("Best trial:")
 print(study.best_trial)

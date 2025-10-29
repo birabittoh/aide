@@ -114,9 +114,7 @@ def get_model_info(ensemble):
     print("\n" + "="*60)
     print("MODEL INFORMATION")
     print("="*60)
-    print(f"Ensemble type: {type(ensemble).__name__}")
-    print(f"Number of estimators: {len(ensemble.estimators_)}")
-    print("\nBase models:")
+    print(f"Model type: {type(ensemble).__name__}")
     print("="*60)
 
 # ==================== Subprocess Mode ====================
@@ -195,29 +193,17 @@ if __name__ == "__main__":
     # Display model info
     get_model_info(ensemble)
     
-    # Example 1: Single text prediction
-    print("\nExample 1: Single Text Prediction")
-    print("-" * 60)
-    
-    sample_text = """
-    Artificial intelligence – it has revolutionized the way we interact with technology.
-    Machine learning algorithms can now process vast amounts of data and identify
-    patterns that would be impossible for humans to detect manually.
-    """
-    
-    probability = predict_text(sample_text, ensemble, vectorizer, tokenizer, return_proba=True)
-    prediction = predict_text(sample_text, ensemble, vectorizer, tokenizer, return_proba=False)
-    
-    print(f"Text: {sample_text.strip()[:100]}...")
-    print(f"\nPrediction: {'AI-generated' if prediction == 1 else 'Human-written'}")
-    print(f"AI Probability: {probability:.4f} ({probability*100:.2f}%)")
-    print(f"Confidence: {abs(probability - 0.5) * 2:.4f}")
-    
-    # Example 2: Batch prediction
+    # Example: Batch prediction
     print("\n\nExample 2: Batch Prediction")
     print("-" * 60)
     
     sample_texts = [
+        """Kiao regaz,
+questo è il mio primo post su questo fantastiko forum!
+Sono unicorniearcobaleni, mi piacciono i gatti, hello kitty, sonic e fare pupazzetti all'uncinetto.
+Ho un bellissimo boy, la sua identità è segreta ma intuibile.
+Buon forum a tutti,
+ci si vede""",
         """When I do the trick, I cross my left thumb under my right and hold the fire button with it. Then I grip the upper left side of the controller with my right hand and rapidly tap up on the d-pad that way. I usuall turn the controller on it's side too.
 
 
@@ -230,13 +216,27 @@ Hope this all helps!(or makes sense ^^;)""",
 
 Hmm...no, the Kimotoma Ruins are pretty much the only thing that needs that License to be accessed. The only other thing the license does is making enemies more aggressive.""",
         "*scratches head* No that didn't make much sense.... I do know I shot green shots when I was taking the test. Anyway I am playing on Hard mode and they start you off with an S-Class liscence so I am not worried about it. The only hard fight will be against Glyde's ship when I protect the machine Roll works on. It took me a couple of tries on Normal Mode. I hope I can get past it.",
+        "Hey! How's it going? I'm just chilling at home watching some Netflix.",
+        """🚀 The Innovation Powering the Future: Artificial Intelligence
+
+We’re living in one of the most transformative periods in human history — the age of artificial intelligence. What was once science fiction has become an engine of innovation driving progress across every industry imaginable.
+
+From predictive healthcare and autonomous vehicles to creative design and personalized learning, AI is not just automating tasks — it’s amplifying human potential.
+
+The real innovation lies not only in the technology itself, but in how we’re learning to collaborate with it. Humans bring context, empathy, and ethics. AI brings scale, speed, and precision. Together, they form a partnership that redefines what’s possible.
+
+As we continue to explore the frontiers of AI, the key question isn’t just “What can AI do?” but rather “How can we use it responsibly to create a better world?”
+
+The future of innovation is human + machine — and it’s unfolding right now. 🌍💡
+
+#ArtificialIntelligence #Innovation #FutureOfWork #AIRevolution #Technology #Leadership""",
         "Furthermore, it is important to note that the aforementioned factors contribute significantly to the overall outcome of the analysis.",
-        "Hey! How's it going? I'm just chilling at home watching some Netflix."
     ]
     
     results = predict_batch(sample_texts, ensemble, vectorizer, tokenizer, show_progress=True)
     
     print("\nResults:")
+    results['text'] = results['text'].str[:40]
     pd.set_option('display.max_colwidth', 50)
     print(results.to_string(index=False))
     pd.reset_option('display.max_colwidth')

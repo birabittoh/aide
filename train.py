@@ -2,6 +2,9 @@ import gc
 import os
 import pickle
 
+# Optuna for hyperparameter optimization
+import optuna
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import numpy as np
@@ -43,66 +46,71 @@ print("Removing duplicates...")
 train = train.drop_duplicates(subset=['text'])
 train.reset_index(drop=True, inplace=True)
 
-# ==================== Remove Near-Duplicates ====================
-print("Detecting and removing near-duplicates...")
+# ==================== Remove Near-Duplicates (Optional) ====================
+REMOVE_NEAR_DUPLICATES = False # gives better results when False
 
-from sklearn.feature_extraction.text import TfidfVectorizer as TfidfVec
-from sklearn.metrics.pairwise import cosine_similarity
+if REMOVE_NEAR_DUPLICATES:
+    print("Detecting and removing near-duplicates...")
 
-# Quick TF-IDF for duplicate detection (word-level, simpler)
-dedup_vectorizer = TfidfVec(
-    max_features=5000,
-    ngram_range=(1, 2),
-    min_df=2
-)
+    from sklearn.feature_extraction.text import TfidfVectorizer as TfidfVec
+    from sklearn.metrics.pairwise import cosine_similarity
 
-# Vectorize texts
-print("  Vectorizing texts for similarity check...")
-dedup_vectors = dedup_vectorizer.fit_transform(train['text'])
+    # Quick TF-IDF for duplicate detection (word-level, simpler)
+    dedup_vectorizer = TfidfVec(
+        max_features=5000,
+        ngram_range=(1, 2),
+        min_df=2
+    )
 
-# Find near-duplicates using cosine similarity
-print("  Computing similarities...")
-similarity_threshold = 0.95  # 95% similar = near duplicate
+    # Vectorize texts
+    print("  Vectorizing texts for similarity check...")
+    dedup_vectors = dedup_vectorizer.fit_transform(train['text'])
 
-# Keep track of indices to remove
-indices_to_remove = set()
+    # Find near-duplicates using cosine similarity
+    print("  Computing similarities...")
+    similarity_threshold = 0.90  # 90% similar = near duplicate
 
-# Process in batches to avoid memory issues
-batch_size = 1000
-n_samples = len(train)
+    # Keep track of indices to remove
+    indices_to_remove = set()
 
-for i in range(0, n_samples, batch_size):
-    end_idx = min(i + batch_size, n_samples)
-    batch_vectors = dedup_vectors[i:end_idx]
-    
-    # Compare with all subsequent samples
-    if end_idx < n_samples:
-        remaining_vectors = dedup_vectors[end_idx:]
-        similarities = cosine_similarity(batch_vectors, remaining_vectors)
+    # Process in batches to avoid memory issues
+    batch_size = 2000
+    n_samples = len(train)
+
+    for i in range(0, n_samples, batch_size):
+        end_idx = min(i + batch_size, n_samples)
+        batch_vectors = dedup_vectors[i:end_idx]
         
-        # Find pairs above threshold
-        high_sim = np.where(similarities > similarity_threshold)
+        # Compare with all subsequent samples
+        if end_idx < n_samples:
+            remaining_vectors = dedup_vectors[end_idx:]
+            similarities = cosine_similarity(batch_vectors, remaining_vectors)
+            
+            # Find pairs above threshold
+            high_sim = np.where(similarities > similarity_threshold)
+            
+            for row, col in zip(high_sim[0], high_sim[1]):
+                # Mark the later index for removal
+                indices_to_remove.add(end_idx + col)
         
-        for row, col in zip(high_sim[0], high_sim[1]):
-            # Mark the later index for removal
-            indices_to_remove.add(end_idx + col)
-    
-    if i % 5000 == 0:
-        print(f"    Processed {i}/{n_samples} samples, found {len(indices_to_remove)} duplicates so far")
+        if i % 10000 == 0:
+            print(f"    Processed {i}/{n_samples} samples, found {len(indices_to_remove)} duplicates so far")
 
-print(f"  Found {len(indices_to_remove)} near-duplicate samples")
+    print(f"  Found {len(indices_to_remove)} near-duplicate samples")
 
-# Remove near-duplicates
-if len(indices_to_remove) > 0:
-    indices_to_keep = [i for i in range(len(train)) if i not in indices_to_remove]
-    train = train.iloc[indices_to_keep].reset_index(drop=True)
-    print(f"  Removed {len(indices_to_remove)} near-duplicates")
-    print(f"  Dataset size after deduplication: {len(train)}")
+    # Remove near-duplicates
+    if len(indices_to_remove) > 0:
+        indices_to_keep = [i for i in range(len(train)) if i not in indices_to_remove]
+        train = train.iloc[indices_to_keep].reset_index(drop=True)
+        print(f"  Removed {len(indices_to_remove)} near-duplicates")
+        print(f"  Dataset size after deduplication: {len(train)}")
+    else:
+        print("  No near-duplicates found")
+
+    del dedup_vectorizer, dedup_vectors
+    gc.collect()
 else:
-    print("  No near-duplicates found")
-
-del dedup_vectorizer, dedup_vectors
-gc.collect()
+    print("Skipping near-duplicate removal (REMOVE_NEAR_DUPLICATES=False)")
 
 # ==================== Split Train/Test ====================
 print("Splitting train/test sets...")
@@ -218,32 +226,34 @@ assert tf_train.shape[0] == len(y_train), f"Train data mismatch: {tf_train.shape
 assert tf_test.shape[0] == len(y_test), f"Test data mismatch: {tf_test.shape[0]} vs {len(y_test)}"
 print("✓ Data and labels are properly aligned")
 
-# ==================== Model Training and Prediction ====================
-print("Training ensemble model...")
+# ==================== Optuna Hyperparameter Optimization ====================
+def objective(trial):
+    params = {
+        'loss': trial.suggest_categorical('loss', ['log_loss', 'modified_huber']),
+        'max_iter': trial.suggest_int('max_iter', 10000, 20000),
+        'tol': trial.suggest_float('tol', 1e-5, 1e-2, log=True),
+        'alpha': trial.suggest_float('alpha', 1e-6, 1e-1, log=True),
+        'penalty': trial.suggest_categorical('penalty', ['l2', 'elasticnet']),
+        'learning_rate': trial.suggest_categorical('learning_rate', ['optimal', 'constant', 'adaptive']),
+        'eta0': trial.suggest_float('eta0', 1e-4, 1.0, log=True),
+        'class_weight': "balanced",
+        'random_state': RANDOM_STATE,
+        'n_jobs': -1
+    }
+    clf = SGDClassifier(**params)
+    clf.fit(tf_train, y_train)
+    y_pred_proba = clf.predict_proba(tf_test)[:, 1]
+    return roc_auc_score(y_test, y_pred_proba)
 
-# MultinomialNB
-clf = MultinomialNB(alpha=0.02)
+print("\nRunning Optuna study for SGDClassifier hyperparameters...")
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=100)
 
-# SGD Classifier
-sgd_model = SGDClassifier(
-    max_iter=8000, 
-    tol=1e-4, 
-    loss="modified_huber", 
-    random_state=RANDOM_STATE
-)
+print("Best trial:")
+print(study.best_trial)
 
-# Use StackingClassifier
-ensemble = StackingClassifier(
-    estimators=[
-        ('mnb', clf),
-        ('sgd', sgd_model),
-    ],
-    final_estimator=LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-    passthrough=False,
-    n_jobs=-1
-)
-
-print("\nTraining ensemble model (this may take a while)...")
+best_params = study.best_trial.params
+ensemble = SGDClassifier(**{**best_params, 'class_weight': 'balanced', 'random_state': RANDOM_STATE, 'n_jobs': -1})
 ensemble.fit(tf_train, y_train)
 gc.collect()
 
@@ -261,8 +271,8 @@ recall = recall_score(y_test, y_pred)
 f1 = f1_score(y_test, y_pred)
 
 metrics = {
-    'metric': ['ROC-AUC', 'Accuracy', 'Precision', 'Recall', 'F1-Score'],
-    'value': [roc_auc, accuracy, precision, recall, f1]
+    'metric': ['ROC-AUC', 'Accuracy', 'Precision', 'Recall', 'F1-Score', 'train_size', 'test_size', 'random_state', 'vocab_size'],
+    'value': [roc_auc, accuracy, precision, recall, f1, len(X_train), len(X_test), RANDOM_STATE, VOCAB_SIZE]
 }
 
 metrics_df = pd.DataFrame(metrics)
@@ -295,18 +305,5 @@ print("✓ Tokenizer exported to: bpe_tokenizer/")
 # Export metrics to CSV
 metrics_df.to_csv(PATH_PREFIX + 'model_metrics.csv', index=False)
 print("✓ Metrics exported to: model_metrics.csv")
-
-# Export model info
-model_info = {
-    'models': ['MultinomialNB', 'SGDClassifier'],
-    'train_size': len(X_train),
-    'test_size': len(X_test),
-    'random_state': RANDOM_STATE,
-    'vocab_size': VOCAB_SIZE
-}
-
-with open(PATH_PREFIX + 'model_info.pkl', 'wb') as f:
-    pickle.dump(model_info, f)
-print("✓ Model info exported to: model_info.pkl")
 
 print("\n✅ Training complete! All artifacts saved.")

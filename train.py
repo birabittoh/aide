@@ -11,9 +11,6 @@ from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, reca
 from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy.sparse import hstack
 
-from sklearn.ensemble import StackingClassifier
-from sklearn.linear_model import LogisticRegression
-
 from common import EXTRA_FEATURES, PATH_PREFIX, dummy, extract_additional_features
 
 from tokenizers import (
@@ -29,7 +26,6 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedTokenizerFast
 
 from sklearn.linear_model import SGDClassifier
-from sklearn.naive_bayes import MultinomialNB
 
 # Set random state
 RANDOM_STATE = 42
@@ -184,7 +180,6 @@ vectorizer = TfidfVectorizer(
     analyzer='word',
     tokenizer=dummy,
     preprocessor=dummy,
-    token_pattern=None, 
     strip_accents='unicode'
 )
 
@@ -227,7 +222,7 @@ print(f"Labels shape - y_train: {y_train.shape}, y_test: {y_test.shape}")
 # Verify alignment
 assert tf_train.shape[0] == len(y_train), f"Train data mismatch: {tf_train.shape[0]} vs {len(y_train)}"
 assert tf_test.shape[0] == len(y_test), f"Test data mismatch: {tf_test.shape[0]} vs {len(y_test)}"
-print("✓ Data and labels are properly aligned")
+print("[OK] Data and labels are properly aligned")
 
 # ==================== Optuna Hyperparameter Optimization ====================
 def objective(trial):
@@ -259,13 +254,13 @@ print("Best trial:")
 print(study.best_trial)
 
 best_params = study.best_trial.params
-ensemble = SGDClassifier(**{**best_params, 'max_iter': 20000, 'penalty': 'elasticnet', 'class_weight': 'balanced', 'random_state': RANDOM_STATE, 'n_jobs': -1, 'early_stopping': True})
-ensemble.fit(tf_train, y_train)
+model = SGDClassifier(**{**best_params, 'max_iter': 20000, 'penalty': 'elasticnet', 'class_weight': 'balanced', 'random_state': RANDOM_STATE, 'n_jobs': -1, 'early_stopping': True})
+model.fit(tf_train, y_train)
 gc.collect()
 
 print("\nMaking predictions...")
-y_pred_proba = ensemble.predict_proba(tf_test)[:, 1]
-y_pred = ensemble.predict(tf_test)
+y_pred_proba = model.predict_proba(tf_test)[:, 1]
+y_pred = model.predict(tf_test)
 
 # ==================== Calculate Metrics ====================
 print("Calculating metrics...")
@@ -277,8 +272,8 @@ recall = recall_score(y_test, y_pred)
 f1 = f1_score(y_test, y_pred)
 
 metrics = {
-    'metric': ['ROC-AUC', 'Accuracy', 'Precision', 'Recall', 'F1-Score', 'train_size', 'test_size', 'random_state', 'vocab_size'],
-    'value': [roc_auc, accuracy, precision, recall, f1, len(X_train), len(X_test), RANDOM_STATE, VOCAB_SIZE]
+    'metric': ['ROC-AUC', 'Accuracy', 'Precision', 'Recall', 'F1-Score', 'train_size', 'test_size', 'random_state', 'vocab_size', 'best_trial', 'best_params'],
+    'value': [roc_auc, accuracy, precision, recall, f1, len(X_train), len(X_test), RANDOM_STATE, VOCAB_SIZE, study.best_trial.number, best_params]
 }
 
 metrics_df = pd.DataFrame(metrics)
@@ -294,22 +289,27 @@ print("\nExporting model and metrics...")
 # Ensure path exists
 os.makedirs(PATH_PREFIX, exist_ok=True)
 
-# Export the ensemble model
-with open(PATH_PREFIX + 'ensemble_model.pkl', 'wb') as f:
-    pickle.dump(ensemble, f)
-print("✓ Model exported to: ensemble_model.pkl")
+model_filename = PATH_PREFIX + 'model.pkl'
+vectorizer_filename = PATH_PREFIX + 'tfidf_vectorizer.pkl'
+tokenizer_dir = PATH_PREFIX + 'bpe_tokenizer'
+metrics_filename = PATH_PREFIX + 'model_metrics.csv'
+
+# Export the model
+with open(PATH_PREFIX + model_filename, 'wb') as f:
+    pickle.dump(model, f)
+print(f"[OK] Model exported to: {model_filename}")
 
 # Export the vectorizer
 with open(PATH_PREFIX + 'tfidf_vectorizer.pkl', 'wb') as f:
     pickle.dump(vectorizer, f)
-print("✓ Vectorizer exported to: tfidf_vectorizer.pkl")
+print("[OK] Vectorizer exported to: tfidf_vectorizer.pkl")
 
 # Export the tokenizer
 tokenizer.save_pretrained(PATH_PREFIX + 'bpe_tokenizer')
-print("✓ Tokenizer exported to: bpe_tokenizer/")
+print("[OK] Tokenizer exported to: bpe_tokenizer/")
 
 # Export metrics to CSV
 metrics_df.to_csv(PATH_PREFIX + 'model_metrics.csv', index=False)
-print("✓ Metrics exported to: model_metrics.csv")
+print("[OK] Metrics exported to: model_metrics.csv")
 
-print("\n✅ Training complete! All artifacts saved.")
+print("\n[OK] Training complete! All artifacts saved.")

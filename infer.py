@@ -1,6 +1,5 @@
 import pickle
 import numpy as np
-import pandas as pd
 from scipy.sparse import hstack
 from transformers import PreTrainedTokenizerFast
 from tqdm.auto import tqdm
@@ -15,10 +14,10 @@ from common import EXTRA_FEATURES, PATH_PREFIX, extract_additional_features, dum
 def load_models(prefix: str = PATH_PREFIX):
     print("Loading model and preprocessing artifacts...")
 
-    # Load ensemble model
-    with open(prefix + 'ensemble_model.pkl', 'rb') as f:
-        ensemble = pickle.load(f)
-    print("[OK] Ensemble model loaded")
+    # Load model
+    with open(prefix + 'model.pkl', 'rb') as f:
+        model = pickle.load(f)
+    print("[OK] Model loaded")
 
     # Load vectorizer
     with open(prefix + 'tfidf_vectorizer.pkl', 'rb') as f:
@@ -29,58 +28,29 @@ def load_models(prefix: str = PATH_PREFIX):
     tokenizer = PreTrainedTokenizerFast.from_pretrained(prefix + 'bpe_tokenizer')
     print("[OK] BPE tokenizer loaded")
 
-    return ensemble, vectorizer, tokenizer
+    return model, vectorizer, tokenizer
 
 # ==================== Prediction Functions ====================
-def predict_text(text: str, ensemble, vectorizer, tokenizer, return_proba=True):
-    """
-    Predict if a text is AI-generated or human-written
-    
-    Args:
-        text (str): Input text to classify
-        return_proba (bool): If True, return probability; if False, return binary prediction
-    
-    Returns:
-        float or int: Probability of being AI-generated (0-1) or binary prediction (0/1)
-    """
-    # Tokenize
-    tokenized = tokenizer.tokenize(text)
-    
-    # Vectorize
-    vectorized = vectorizer.transform([tokenized])
+# All prediction logic is now handled in predict_batch.
 
-    if EXTRA_FEATURES:
-        # Feature aggiuntive
-        extra_features = extract_additional_features([text])
-
-        # Concatenazione sparse + dense
-        vectorized = hstack([vectorized, extra_features])
-    
-    # Predict
-    if return_proba:
-        proba = ensemble.predict_proba(vectorized)[0, 1]
-        return proba
-    else:
-        pred = ensemble.predict(vectorized)[0]
-        return pred
-
-def predict_batch(texts, ensemble, vectorizer, tokenizer, show_progress=True):
+def predict_batch(texts, model, vectorizer, tokenizer, show_progress=True, threshold=0.5):
     """
     Predict multiple texts at once
-    
+
     Args:
         texts (list): List of texts to classify
         show_progress (bool): Show progress bar
-    
+        threshold (float): Probability threshold for classification (default 0.5)
+
     Returns:
-        pd.DataFrame: DataFrame with texts, predictions, and probabilities
+        list: List of dicts with prediction results
     """
     # Tokenize all texts
     tokenized_texts = []
     iterator = tqdm(texts, desc="Tokenizing") if show_progress else texts
     for text in iterator:
         tokenized_texts.append(tokenizer.tokenize(text))
-    
+
     # Vectorize
     if show_progress:
         print("Vectorizing...")
@@ -93,30 +63,36 @@ def predict_batch(texts, ensemble, vectorizer, tokenizer, show_progress=True):
         # Concatenazione sparse + dense
         vectorized = hstack([vectorized, extra_features])
 
-    # Predict
+    # Predict probabilities only
     if show_progress:
         print("Making predictions...")
-    probas = ensemble.predict_proba(vectorized)[:, 1]
-    preds = ensemble.predict(vectorized)
+    probas = model.predict_proba(vectorized)[:, 1]
+    preds = (probas > threshold).astype(int)
 
-    # Create results dataframe
-    results = pd.DataFrame({
-        'text': texts,
-        'prediction': ['AI-generated' if p == 1 else 'Human-written' for p in preds],
-        'ai_probability': probas,
-        'confidence': np.abs(probas - 0.5) * 2  # 0 = uncertain, 1 = very confident
-    })
+    results = []
+    for i, text in enumerate(texts):
+        ai_prob = float(probas[i])
+        human_prob = float(1 - ai_prob)
+        confidence = float(np.abs(ai_prob - 0.5) * 2)
+        results.append({
+            'uuid': None,
+            'text': text,
+            'prediction': 'AI' if preds[i] == 1 else 'Human',
+            'confidence': confidence,
+            'human_prob': human_prob,
+            'ai_prob': ai_prob
+        })
 
     return results
 
-def get_model_info(ensemble):
+def get_model_info(model):
     """
-    Display information about the loaded ensemble model
+    Display information about the loaded model
     """
     print("\n" + "="*60)
     print("MODEL INFORMATION")
     print("="*60)
-    print(f"Model type: {type(ensemble).__name__}")
+    print(f"Model type: {type(model).__name__}")
     print("="*60)
 
 # ==================== Subprocess Mode ====================
@@ -126,47 +102,20 @@ def run_batch_prediction(input_path: str, output_path: str):
     Called when script is run as subprocess.
     """
     # Load models
-    ensemble, vectorizer, tokenizer = load_models()
+    model, vectorizer, tokenizer = load_models()
     
     # Read input
     with open(input_path, 'r') as f:
         requests = json.load(f)
-    
-    results = []
-    
-    # Process each request
-    for req in requests:
-        uuid = req['uuid']
-        text = req['text']
-        
-        # Tokenize
-        tokenized = tokenizer.tokenize(text)
-        
-        # Vectorize
-        vectorized = vectorizer.transform([tokenized])
 
-        if EXTRA_FEATURES:
-            # Extract additional features
-            extra_features = extract_additional_features([text])
-        
-            # Concatenate sparse + dense features
-            vectorized = hstack([vectorized, extra_features])
-        
-        # Predict
-        probabilities = ensemble.predict_proba(vectorized)[0]
-        prediction = ensemble.predict(vectorized)[0]
-        
-        human_prob = float(probabilities[0])
-        ai_prob = float(probabilities[1])
-        
-        results.append({
-            'uuid': uuid,
-            'prediction': 'AI' if prediction == 1 else 'Human',
-            'confidence': max(human_prob, ai_prob),
-            'human_prob': human_prob,
-            'ai_prob': ai_prob
-        })
-    
+    texts = [req['text'] for req in requests]
+    uuids = [req['uuid'] for req in requests]
+
+    # Use predict_batch for all predictions
+    batch_results = predict_batch(texts, model, vectorizer, tokenizer, show_progress=False)
+
+    results = [{**res, 'uuid': uuids[i]} for i, res in enumerate(batch_results)]
+
     # Write output
     with open(output_path, 'w') as f:
         json.dump(results, f)
@@ -187,17 +136,17 @@ if __name__ == "__main__":
         sys.exit(0)
     
     # Otherwise run interactive examples
-    ensemble, vectorizer, tokenizer = load_models(prefix)
+    model, vectorizer, tokenizer = load_models(prefix)
     
     print("\n" + "="*60)
     print("AI CONTENT DETECTION - INFERENCE")
     print("="*60)
     
     # Display model info
-    get_model_info(ensemble)
+    get_model_info(model)
     
     # Example: Batch prediction
-    print("\n\nExample 2: Batch Prediction")
+    print("\n\nBatch Prediction")
     print("-" * 60)
     
     sample_texts = [
@@ -220,7 +169,7 @@ Hope this all helps!(or makes sense ^^;)""",
 Hmm...no, the Kimotoma Ruins are pretty much the only thing that needs that License to be accessed. The only other thing the license does is making enemies more aggressive.""",
         "*scratches head* No that didn't make much sense.... I do know I shot green shots when I was taking the test. Anyway I am playing on Hard mode and they start you off with an S-Class liscence so I am not worried about it. The only hard fight will be against Glyde's ship when I protect the machine Roll works on. It took me a couple of tries on Normal Mode. I hope I can get past it.",
         "Hey! How's it going? I'm just chilling at home watching some Netflix.",
-        """🚀 The Innovation Powering the Future: Artificial Intelligence
+        """The Innovation Powering the Future: Artificial Intelligence
 
 We’re living in one of the most transformative periods in human history — the age of artificial intelligence. What was once science fiction has become an engine of innovation driving progress across every industry imaginable.
 
@@ -236,11 +185,9 @@ The future of innovation is human + machine — and it’s unfolding right now. 
         "Furthermore, it is important to note that the aforementioned factors contribute significantly to the overall outcome of the analysis.",
     ]
     
-    results = predict_batch(sample_texts, ensemble, vectorizer, tokenizer, show_progress=True)
+    results = predict_batch(sample_texts, model, vectorizer, tokenizer, show_progress=True)
     
     print("\nResults:")
-    results['text'] = results['text'].str[:40]
-    pd.set_option('display.max_colwidth', 50)
-    print(results.to_string(index=False))
-    pd.reset_option('display.max_colwidth')
+    for res in results:
+        print(f"text: {res['text'][:40]!r} | prediction: {res['prediction']} | confidence: {res['confidence']:.4f} | human_prob: {res['human_prob']:.4f} | ai_prob: {res['ai_prob']:.4f}")
     print("="*60)

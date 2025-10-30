@@ -177,6 +177,7 @@ async def enqueue_request(request: EnqueueRequest):
     
     return EnqueueResponse(uuid=req_uuid)
 
+@app.head("/queue")
 @app.get("/queue")
 async def queue_status() -> QueueStatus:
     """Get queue status"""

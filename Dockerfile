@@ -3,6 +3,9 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# Install wget for healthcheck
+RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
@@ -17,7 +20,7 @@ RUN uv sync
 # Copy application code
 COPY *.py .
 
-# Create directory for model cache
+# Create directory for models
 RUN mkdir -p /app/models
 
 # Expose port

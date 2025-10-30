@@ -1,12 +1,12 @@
 import numpy as np
 
-PATH_PREFIX = './models/02 - sgd/'
+PATH_PREFIX = './models/03/'
 
 EXTRA_FEATURES = True
 
 def extract_additional_features(texts):
     if not EXTRA_FEATURES:
-        return np.array([])
+        raise ValueError("EXTRA_FEATURES is set to False")
 
     features = []
     for t in texts:

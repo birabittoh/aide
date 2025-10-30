@@ -14,7 +14,7 @@ from scipy.sparse import hstack
 from sklearn.ensemble import StackingClassifier
 from sklearn.linear_model import LogisticRegression
 
-from common import PATH_PREFIX, dummy, extract_additional_features
+from common import EXTRA_FEATURES, PATH_PREFIX, dummy, extract_additional_features
 
 from tokenizers import (
     models,
@@ -136,7 +136,7 @@ print(f"Train labels: {len(y_train)}, Test labels: {len(y_test)}")
 # ==================== Configuration Parameters ====================
 LOWERCASE = False
 VOCAB_SIZE = 30522
-OPTUNA_TRIALS = 150
+OPTUNA_TRIALS = 120
 
 # ==================== Byte-Pair Encoding Tokenizer Training ====================
 print("Training BPE tokenizer...")
@@ -210,16 +210,18 @@ tf_test = vectorizer.transform(tokenized_texts_test)
 
 print(f"TF-IDF shape - Train: {tf_train.shape}, Test: {tf_test.shape}")
 
-# Estrazione delle feature extra
-print("Adding handcrafted features...")
-extra_train = extract_additional_features(X_train)
-extra_test = extract_additional_features(X_test)
+if EXTRA_FEATURES:
+    # Estrazione delle feature extra
+    print("Adding handcrafted features...")
+    extra_train = extract_additional_features(X_train)
+    extra_test = extract_additional_features(X_test)
 
-# Concatenazione con le matrici TF-IDF
-tf_train = hstack([tf_train, extra_train])
-tf_test = hstack([tf_test, extra_test])
+    # Concatenazione con le matrici TF-IDF
+    tf_train = hstack([tf_train, extra_train])
+    tf_test = hstack([tf_test, extra_test])
 
-print(f"New feature shape - Train: {tf_train.shape}, Test: {tf_test.shape}")
+    print(f"New feature shape - Train: {tf_train.shape}, Test: {tf_test.shape}")
+
 print(f"Labels shape - y_train: {y_train.shape}, y_test: {y_test.shape}")
 
 # Verify alignment
@@ -231,15 +233,17 @@ print("✓ Data and labels are properly aligned")
 def objective(trial):
     params = {
         'loss': trial.suggest_categorical('loss', ['log_loss', 'modified_huber']),
-        'max_iter': trial.suggest_int('max_iter', 10000, 20000),
-        'tol': trial.suggest_float('tol', 1e-5, 1e-2, log=True),
-        'alpha': trial.suggest_float('alpha', 1e-6, 1e-1, log=True),
-        'penalty': trial.suggest_categorical('penalty', ['l2', 'elasticnet']),
+        'alpha': trial.suggest_float('alpha', 1e-8, 1e-5, log=True),
+        'l1_ratio': trial.suggest_float('l1_ratio', 0, 1),
+        'tol': trial.suggest_float('tol', 1e-7, 1e-4, log=True),
         'learning_rate': trial.suggest_categorical('learning_rate', ['optimal', 'constant', 'adaptive']),
-        'eta0': trial.suggest_float('eta0', 1e-4, 1.0, log=True),
+        'eta0': trial.suggest_float('eta0', 1e-4, 100, log=True),
+        'max_iter': 20000,
+        'early_stopping': True,
         'class_weight': "balanced",
+        'n_jobs': -1,
         'random_state': RANDOM_STATE,
-        'n_jobs': -1
+        'penalty': 'elasticnet',
     }
     clf = SGDClassifier(**params)
     clf.fit(tf_train, y_train)
@@ -255,7 +259,7 @@ print("Best trial:")
 print(study.best_trial)
 
 best_params = study.best_trial.params
-ensemble = SGDClassifier(**{**best_params, 'class_weight': 'balanced', 'random_state': RANDOM_STATE, 'n_jobs': -1})
+ensemble = SGDClassifier(**{**best_params, 'max_iter': 20000, 'penalty': 'elasticnet', 'class_weight': 'balanced', 'random_state': RANDOM_STATE, 'n_jobs': -1, 'early_stopping': True})
 ensemble.fit(tf_train, y_train)
 gc.collect()
 

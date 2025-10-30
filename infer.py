@@ -9,7 +9,7 @@ import sys
 import json
 from dotenv import load_dotenv
 
-from common import PATH_PREFIX, extract_additional_features, dummy # dummy is used by pickle.load
+from common import EXTRA_FEATURES, PATH_PREFIX, extract_additional_features, dummy # dummy is used by pickle.load
 
 # ==================== Load Model and Preprocessing ====================
 def load_models(prefix: str = PATH_PREFIX):
@@ -49,18 +49,19 @@ def predict_text(text: str, ensemble, vectorizer, tokenizer, return_proba=True):
     # Vectorize
     vectorized = vectorizer.transform([tokenized])
 
-    # Feature aggiuntive
-    extra_features = extract_additional_features([text])
+    if EXTRA_FEATURES:
+        # Feature aggiuntive
+        extra_features = extract_additional_features([text])
 
-    # Concatenazione sparse + dense
-    full_features = hstack([vectorized, extra_features])
+        # Concatenazione sparse + dense
+        vectorized = hstack([vectorized, extra_features])
     
     # Predict
     if return_proba:
-        proba = ensemble.predict_proba(full_features)[0, 1]
+        proba = ensemble.predict_proba(vectorized)[0, 1]
         return proba
     else:
-        pred = ensemble.predict(full_features)[0]
+        pred = ensemble.predict(vectorized)[0]
         return pred
 
 def predict_batch(texts, ensemble, vectorizer, tokenizer, show_progress=True):
@@ -85,17 +86,18 @@ def predict_batch(texts, ensemble, vectorizer, tokenizer, show_progress=True):
         print("Vectorizing...")
     vectorized = vectorizer.transform(tokenized_texts)
 
-    # Feature aggiuntive
-    extra_features = extract_additional_features(texts)
+    if EXTRA_FEATURES:
+        # Feature aggiuntive
+        extra_features = extract_additional_features(texts)
 
-    # Concatenazione sparse + dense
-    full_features = hstack([vectorized, extra_features])
+        # Concatenazione sparse + dense
+        vectorized = hstack([vectorized, extra_features])
 
     # Predict
     if show_progress:
         print("Making predictions...")
-    probas = ensemble.predict_proba(full_features)[:, 1]
-    preds = ensemble.predict(full_features)
+    probas = ensemble.predict_proba(vectorized)[:, 1]
+    preds = ensemble.predict(vectorized)
 
     # Create results dataframe
     results = pd.DataFrame({
@@ -142,16 +144,17 @@ def run_batch_prediction(input_path: str, output_path: str):
         
         # Vectorize
         vectorized = vectorizer.transform([tokenized])
+
+        if EXTRA_FEATURES:
+            # Extract additional features
+            extra_features = extract_additional_features([text])
         
-        # Extract additional features
-        extra_features = extract_additional_features([text])
-        
-        # Concatenate sparse + dense features
-        full_features = hstack([vectorized, extra_features])
+            # Concatenate sparse + dense features
+            vectorized = hstack([vectorized, extra_features])
         
         # Predict
-        probabilities = ensemble.predict_proba(full_features)[0]
-        prediction = ensemble.predict(full_features)[0]
+        probabilities = ensemble.predict_proba(vectorized)[0]
+        prediction = ensemble.predict(vectorized)[0]
         
         human_prob = float(probabilities[0])
         ai_prob = float(probabilities[1])
@@ -240,33 +243,4 @@ The future of innovation is human + machine — and it’s unfolding right now. 
     pd.set_option('display.max_colwidth', 50)
     print(results.to_string(index=False))
     pd.reset_option('display.max_colwidth')
-    
-    # Example 3: Load and predict from CSV
-    print("\n\nExample 3: Predict from CSV (if available)")
-    print("-" * 60)
-    
-    try:
-        # Try to load a CSV file
-        df = pd.read_csv('test_essays.csv')
-        print(f"[OK] Found test file with {len(df)} rows")
-        
-        # Predict on a subset
-        sample_size = min(10, len(df))
-        sample_df = df.head(sample_size)
-        
-        print(f"\nProcessing first {sample_size} rows...")
-        results = predict_batch(sample_df['text'].tolist(), ensemble, vectorizer, tokenizer, show_progress=True)
-        
-        print(f"\nPredictions for first {sample_size} rows:")
-        print(results[['prediction', 'ai_probability', 'confidence']].to_string())
-        
-        # Save results
-        results.to_csv('predictions.csv', index=False)
-        print(f"\n[OK] Full predictions saved to: predictions.csv")
-        
-    except FileNotFoundError:
-        print("[WARN] No test_essays.csv found. Skipping this example.")
-    except Exception as e:
-        print(f"[WARN] Error processing CSV: {e}")
-    
-    print("\n" + "="*60)
+    print("="*60)
